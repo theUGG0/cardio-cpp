@@ -26,5 +26,7 @@ vector<float> read_csv_data(string filename){
 
 int main(){
     vector<float> data{read_csv_data("100_ekg.csv")};
-    cout << data[67];
+    HeartRateAnalyzer h{};
+    
+    h._pam_tompkins(data);
 }
