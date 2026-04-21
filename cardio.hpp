@@ -3,6 +3,7 @@
 #include <cstddef>
 #include <cstdint>
 #include <fstream>
+#include <iostream>
 #include <numeric>
 #include <unordered_set>
 #include <vector>
@@ -89,31 +90,90 @@ std::vector<HeartBeat> HeartRateAnalyzer::_pam_tompkins(std::vector<float>& raw_
     }
 
     std::vector<size_t> R_peaks{};
-
-    double sig = 0.5 * (*std::max_element(integrated.begin(), integrated.end()));
-    double noise = std::accumulate(integrated.begin(), integrated.end(), 0.0f) / integrated.size();
-    double thresh = noise + 0.25 * (sig - noise);
-    size_t last_peak_index = 0;
     
-    const size_t refractory_period_len = sampling_rate_hz * 0.2;
+    // running estimates for integrated signal
+    double max_integrated = *std::max_element(integrated.begin(), integrated.end());
+    double SPKI = 0.0;
+    double NPKI = 0.0;
+    double thresholdI1 = 0.35 * max_integrated;
+    
+    // running estimates for filtered signal  
+    double max_filtered = std::max(*std::max_element(highpass.begin(), highpass.end()),
+                                   std::abs(*std::min_element(highpass.begin(), highpass.end())));
+    double SPKF = 0.0;
+    double NPKF = 0.0;
+    double thresholdF1 = 0.35 * max_filtered;
+    
+    const size_t refractory_period = sampling_rate_hz * 0.2;
+    size_t last_qrs_index = 0;
+    bool first_peak = true;
+    
+    for (size_t i = 2; i < integrated.size(); i++){
 
-    for (size_t i = 2; i < integrated.size(); i++){ // implement cross referencing with highpass filtered value
         if (integrated[i-2] < integrated[i-1] && integrated[i-1] > integrated[i]){
-            float peak_value = integrated[i-1];
-
-            bool refractory_period_inactive = (last_peak_index == 0) || (i-1 - last_peak_index > refractory_period_len);
-
-            if (peak_value > thresh && refractory_period_inactive){
-                sig = 0.125 * peak_value + 0.875 * sig;
-                R_peaks.push_back(i-1);
-                last_peak_index = i-1;
+            
+            float peakI = integrated[i-1];
+            size_t peak_idx_integrated = i - 1;
+            
+            bool refractory_ok = (last_qrs_index == 0) || 
+                                (peak_idx_integrated - last_qrs_index > refractory_period);
+            
+            if (peakI > thresholdI1 && refractory_ok){
+                
+                // search in a window around the integrated peak
+                size_t search_start = (peak_idx_integrated > 50) ? peak_idx_integrated - 50 : 0;
+                size_t search_end = std::min(peak_idx_integrated + 50, highpass.size() - 1);
+                
+                // find maximum absolute value in filtered signal
+                float max_abs_filtered = 0.0f;
+                size_t peak_idx_filtered = peak_idx_integrated;
+                
+                for (size_t j = search_start; j <= search_end; j++){
+                    if (std::abs(highpass[j]) > max_abs_filtered){
+                        max_abs_filtered = std::abs(highpass[j]);
+                        peak_idx_filtered = j;
+                    }
+                }
+                
+                float peakF = std::abs(highpass[peak_idx_filtered]);
+                
+                // check if filtered peak over thresh
+                if (peakF > thresholdF1){
+                    R_peaks.push_back(peak_idx_filtered);  // use filtered signal location
+                    last_qrs_index = peak_idx_integrated;
+                    
+                    // update signal peak estimates
+                    if (first_peak){
+                        SPKI = peakI;
+                        SPKF = peakF;
+                        first_peak = false;
+                    } else {
+                        SPKI = 0.125 * peakI + 0.875 * SPKI;
+                        SPKF = 0.125 * peakF + 0.875 * SPKF;
+                    }
+                    
+                } else {
+                    NPKI = 0.125 * peakI + 0.875 * NPKI;
+                    NPKF = 0.125 * peakF + 0.875 * NPKF;
+                }
+                
+            } else if (peakI > 0.0){ 
+                NPKI = 0.125 * peakI + 0.875 * NPKI;
             }
-            else {
-                noise = 0.125 * peak_value + 0.875 * noise;
+            
+            if (SPKI > 0 && NPKI > 0){
+                thresholdI1 = NPKI + 0.25 * (SPKI - NPKI);
+                thresholdI1 = std::max(thresholdI1, 0.3 * max_integrated); 
             }
-            thresh = noise + 0.25 * (sig - noise);
+            
+            if (SPKF > 0 && NPKF > 0){
+                thresholdF1 = NPKF + 0.25 * (SPKF - NPKF);
+                thresholdF1 = std::max(thresholdF1, 0.3 * max_filtered);
+            }
         }
     }
+    
+    std::cout << "Detected " << R_peaks.size() << " QRS complexes" << std::endl;
 
     std::ofstream file{"testout.csv"};
     file << "index,integrated,r_peak_marker\n";
@@ -123,11 +183,9 @@ std::vector<HeartBeat> HeartRateAnalyzer::_pam_tompkins(std::vector<float>& raw_
     for (size_t i = 0; i < integrated.size(); i++){
         file << i << "," << integrated[i] << ",";
         
-        // Put the integrated value at R-peaks, empty otherwise
         if (r_peak_set.count(i) > 0){
-            file << integrated[i];  // Same value as integrated
+            file << "R"; 
         }
-        // else: leave empty
         
         file << "\n";
     }
