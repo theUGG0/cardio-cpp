@@ -184,7 +184,7 @@ std::vector<HeartBeat> HeartRateAnalyzer::_pam_tompkins(std::vector<float>& raw_
         file << i << "," << integrated[i] << ",";
         
         if (r_peak_set.count(i) > 0){
-            file << "R"; 
+            file << "N"; 
         }
         
         file << "\n";
