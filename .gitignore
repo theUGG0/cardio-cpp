@@ -1,3 +1,4 @@
 *.o
 *.so
 *program
+/examples/compile_commands.json
