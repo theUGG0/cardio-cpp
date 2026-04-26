@@ -108,23 +108,29 @@ std::vector<HeartBeat> HeartRateAnalyzer::_pam_tompkins(std::vector<float>& raw_
     size_t last_qrs_index = 0;
     bool first_peak = true;
     
-    for (size_t i = 2; i < integrated.size(); i++){
 
+    // TODO: Implement searchback with half of thresholdI1 at 1.66x RR interval passed with no peaks.
+    // TODO: Fix offset issues with detected peaks (seems to be around 30 samples)
+
+    for (size_t i = 2; i < integrated.size(); i++){
+    // look for peak in integrated signal
         if (integrated[i-2] < integrated[i-1] && integrated[i-1] > integrated[i]){
             
             float peakI = integrated[i-1];
             size_t peak_idx_integrated = i - 1;
             
-            bool refractory_ok = (last_qrs_index == 0) || 
-                                (peak_idx_integrated - last_qrs_index > refractory_period);
+            // skip peaks during refractory period
+            if (last_qrs_index > 0 && (peak_idx_integrated - last_qrs_index <= refractory_period)){
+                continue;
+            }
             
-            if (peakI > thresholdI1 && refractory_ok){
+            // Now process the peak
+            if (peakI > thresholdI1){
                 
-                // search in a window around the integrated peak
+                // Search for corresponding peak in filtered signal
                 size_t search_start = (peak_idx_integrated > 50) ? peak_idx_integrated - 50 : 0;
                 size_t search_end = std::min(peak_idx_integrated + 50, highpass.size() - 1);
                 
-                // find maximum absolute value in filtered signal
                 float max_abs_filtered = 0.0f;
                 size_t peak_idx_filtered = peak_idx_integrated;
                 
@@ -137,12 +143,13 @@ std::vector<HeartBeat> HeartRateAnalyzer::_pam_tompkins(std::vector<float>& raw_
                 
                 float peakF = std::abs(highpass[peak_idx_filtered]);
                 
-                // check if filtered peak over thresh
+                // check if found filtered signal is over filtered thresh
+                // if yes, its a QRS 
                 if (peakF > thresholdF1){
-                    R_peaks.push_back(peak_idx_filtered);  // use filtered signal location
+
+                    R_peaks.push_back(peak_idx_filtered);
                     last_qrs_index = peak_idx_integrated;
                     
-                    // update signal peak estimates
                     if (first_peak){
                         SPKI = peakI;
                         SPKF = peakF;
@@ -151,24 +158,24 @@ std::vector<HeartBeat> HeartRateAnalyzer::_pam_tompkins(std::vector<float>& raw_
                         SPKI = 0.125 * peakI + 0.875 * SPKI;
                         SPKF = 0.125 * peakF + 0.875 * SPKF;
                     }
-                    
                 } else {
+                    // if wasnt over filtered thresh it had to be noise
                     NPKI = 0.125 * peakI + 0.875 * NPKI;
                     NPKF = 0.125 * peakF + 0.875 * NPKF;
                 }
                 
-            } else if (peakI > 0.0){ 
+            } else {
+                // if peak wasnt over interated thresh it had to be noise
                 NPKI = 0.125 * peakI + 0.875 * NPKI;
             }
-            
+                
+            // update integrated and filtered signal threshold if running estimates are over 0
             if (SPKI > 0 && NPKI > 0){
                 thresholdI1 = NPKI + 0.25 * (SPKI - NPKI);
-                thresholdI1 = std::max(thresholdI1, 0.3 * max_integrated); 
             }
             
             if (SPKF > 0 && NPKF > 0){
                 thresholdF1 = NPKF + 0.25 * (SPKF - NPKF);
-                thresholdF1 = std::max(thresholdF1, 0.3 * max_filtered);
             }
         }
     }
