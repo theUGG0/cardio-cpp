@@ -26,9 +26,12 @@ struct HRVStatus
 
 class HeartRateAnalyzer
 {
+    unsigned int m_sampling_rate_hz{200};
+
     public:
         HeartRateAnalyzer() = default;
-        std::vector<HeartBeat> _pam_tompkins(std::vector<float>& raw_data_mv, unsigned int sampling_rate_hz);
+        HeartRateAnalyzer(int sample_rate_hz) : m_sampling_rate_hz(sample_rate_hz) {};
+        std::vector<HeartBeat> _pam_tompkins(std::vector<float>& raw_data_mv);
 
         int add_data(std::vector<float> data);
         int push_data(float sample, uint32_t timestamp_ms);
@@ -38,7 +41,7 @@ class HeartRateAnalyzer
 };
 
 // based on https://en.wikipedia.org/wiki/Pan%E2%80%93Tompkins_algorithm
-std::vector<HeartBeat> HeartRateAnalyzer::_pam_tompkins(std::vector<float>& raw_data_mv, const unsigned int sampling_rate_hz=200){
+std::vector<HeartBeat> HeartRateAnalyzer::_pam_tompkins(std::vector<float>& raw_data_mv){
     std::vector<float> lowpass(raw_data_mv.size(), 0.0f); // TODO: optimization (circular buffer or whatever)
 
     for (size_t i = 12; i < raw_data_mv.size(); i++){
@@ -75,7 +78,7 @@ std::vector<HeartBeat> HeartRateAnalyzer::_pam_tompkins(std::vector<float>& raw_
         squared[i] = derivative[i] * derivative[i];
     }
 
-    const unsigned int window_size = sampling_rate_hz * 0.15;
+    const unsigned int window_size = m_sampling_rate_hz * 0.15;
     std::vector<float> integrated(squared.size(), 0.0f);
 
     float sliding_sum{};
@@ -104,7 +107,7 @@ std::vector<HeartBeat> HeartRateAnalyzer::_pam_tompkins(std::vector<float>& raw_
     double NPKF = 0.0;
     double thresholdF1 = 0.35 * max_filtered;
     
-    const size_t refractory_period = sampling_rate_hz * 0.2;
+    const size_t refractory_period = m_sampling_rate_hz * 0.2;
     size_t last_qrs_index = 0;
     bool first_peak = true;
     
