@@ -1,5 +1,6 @@
 #include <algorithm>
 #include <array>
+#include <cassert>
 #include <cmath>
 #include <cstddef>
 #include <cstdint>
@@ -40,14 +41,15 @@ class circular_buffer
         void push_value(T n);
         size_t size();
         bool full();
-        T operator[] (size_t n);
+        T& operator[] (size_t n);
 };
 
 template<typename T, size_t BS>
-T circular_buffer<T, BS>::operator[] (size_t n){
-    if (n > BS) n = BS; // just incase
-    size_t new_idx =  m_idx - 1 - n;
-    return m_data[(BS+new_idx)%BS];
+T& circular_buffer<T, BS>::operator[] (size_t n){
+    assert(n < BS); // just incase
+    if (n >= BS) n = BS-1; // clamp out of bounds.. feels not that pretty 
+    size_t new_idx =  (BS + m_idx - 1 - n)%BS;
+    return m_data[new_idx];
 }
 
 template<typename T, size_t BS>
@@ -86,16 +88,18 @@ class HeartRateAnalyzer
 };
 
 // based on https://en.wikipedia.org/wiki/Pan%E2%80%93Tompkins_algorithm
+// and https://doi.org/10.1109%2FTBME.1985.325532
+template<size_t SAMPLERATE>
 class PanTompkins
 {
     private:
 
         // use queues as circular buffers between processing steps for memory optimisation
-        std::queue<float> m_temp_raw_buff{}; // needed if first pushed data count < lowpass needed data count 
-        std::queue<float> m_lowpass_buff{};
-        std::queue<float> m_highpass_buff{};
-        std::queue<float> m_sqr_derivative_buff{};
-        std::queue<float> m_integrate_buff{};
+        // each buffer gets its name from what stage its buffering FOR
+        circular_buffer<float, 13> m_lowpass_buff{};
+        circular_buffer<float, 33> m_highpass_buff{};
+        circular_buffer<float, 4> m_sqr_derivative_buff{};
+        circular_buffer<float, static_cast<size_t>(SAMPLERATE*0.35)> m_integrate_buff{};
 
         void m_lowpass();
         void m_highpass();
@@ -117,17 +121,35 @@ class PanTompkins
         std::optional<HeartBeat> m_peak_detector();
 
     public:
-        std::optional<float> push_data(std::vector<float>& raw_data_mv);
+        std::optional<HeartBeat> push_data(float raw_data_mv);
 };
 
-/*
-std::optional<float> PanTompkins::push_data(std::vector<float>& raw_data_mv){
-    // check if enough data is in filter pipeline stage buffers for processing to take place
-    if (m_temp_raw_buff.size() >= 12) {
-        m_lowpass();
-    }
-}*/
+template<size_t SAMPLERATE>
+std::optional<HeartBeat> PanTompkins<SAMPLERATE>::push_data(float raw_data_mv){
+    m_lowpass_buff.push_value(raw_data_mv);
 
+    if(m_lowpass_buff.full()) m_lowpass();
+    if(m_highpass_buff.full()) m_highpass();
+}
+
+template<size_t SAMPLERATE>
+void PanTompkins<SAMPLERATE>::m_lowpass(){
+        m_highpass_buff.push_value(m_lowpass_buff[0] 
+            - 2*m_lowpass_buff[6] 
+            + m_lowpass_buff[12] 
+            + 2*m_highpass_buff[1]
+            - m_highpass_buff[2]);
+        m_highpass_buff[0] /= 32; // normalize gain
+}
+
+template<size_t SAMPLERATE>
+void PanTompkins<SAMPLERATE>::m_highpass(){
+    m_highpass_buff.push_value(m_highpass_buff[1] 
+        - m_highpass_buff[0]/32.0f 
+        + m_highpass_buff[16] 
+        - m_highpass_buff[17] 
+        + m_highpass_buff[32]/32.0f);
+}
 
 std::vector<HeartBeat> HeartRateAnalyzer::_pam_tompkins(std::vector<float>& raw_data_mv){
     std::vector<float> lowpass(raw_data_mv.size(), 0.0f); // TODO: optimization (circular buffer or whatever)
