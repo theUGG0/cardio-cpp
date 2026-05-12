@@ -1,17 +1,19 @@
 #include <algorithm>
+#include <array>
 #include <cmath>
 #include <cstddef>
 #include <cstdint>
 #include <fstream>
 #include <iostream>
-#include <numeric>
+#include <optional>
+#include <queue>
 #include <unordered_set>
 #include <vector>
 
 struct HeartBeat
 {
     uint32_t timestamp_ms;
-    uint32_t rr_interval_ns;
+    uint32_t peak_mv;
 };
 
 struct HRVStatus
@@ -24,9 +26,52 @@ struct HRVStatus
     int total_beats;
 };
 
+template<typename T, size_t BS>
+class circular_buffer
+{
+    std::array<T, BS> m_data{};
+    size_t m_idx{};
+    size_t m_fill_count{};
+
+    public:
+        circular_buffer() = default;
+        circular_buffer(std::array<T, BS> data, size_t len) : m_data(data), m_idx(len-1), m_fill_count(m_idx){};
+        ~circular_buffer() = default; 
+        void push_value(T n);
+        size_t size();
+        bool full();
+        T operator[] (size_t n);
+};
+
+template<typename T, size_t BS>
+T circular_buffer<T, BS>::operator[] (size_t n){
+    if (n > BS) n = BS; // just incase
+    size_t new_idx =  m_idx - 1 - n;
+    return m_data[(BS+new_idx)%BS];
+}
+
+template<typename T, size_t BS>
+void circular_buffer<T, BS>::push_value(T n){
+    if (m_fill_count < BS) m_fill_count++;
+
+    m_data[m_idx] = n;
+    m_idx = (m_idx + 1) % BS;
+}
+
+template<typename T, size_t BS>
+size_t circular_buffer<T, BS>::size(){
+    return m_fill_count;
+}
+
+template<typename T, size_t BS>
+bool circular_buffer<T, BS>::full(){
+    return m_fill_count >= BS;
+}
+
 class HeartRateAnalyzer
 {
-    unsigned int m_sampling_rate_hz{200};
+    private:
+        unsigned int m_sampling_rate_hz{200};
 
     public:
         HeartRateAnalyzer() = default;
@@ -41,6 +86,49 @@ class HeartRateAnalyzer
 };
 
 // based on https://en.wikipedia.org/wiki/Pan%E2%80%93Tompkins_algorithm
+class PanTompkins
+{
+    private:
+
+        // use queues as circular buffers between processing steps for memory optimisation
+        std::queue<float> m_temp_raw_buff{}; // needed if first pushed data count < lowpass needed data count 
+        std::queue<float> m_lowpass_buff{};
+        std::queue<float> m_highpass_buff{};
+        std::queue<float> m_sqr_derivative_buff{};
+        std::queue<float> m_integrate_buff{};
+
+        void m_lowpass();
+        void m_highpass();
+        void m_sqr_derivative();
+        void m_integrate();
+
+        // running estimates for integrated signal 
+        double m_max_integrated{};
+        double m_SPKI = 0.0;
+        double m_NPKI = 0.0;
+        double thresholdI1{}; //0.35 * m_max_integrated;
+        
+        // running estimates for filtered signal  
+        double max_filtered{};
+        double SPKF = 0.0;
+        double NPKF = 0.0;
+        double thresholdF1{}; // 0.35 * max_filtered;
+
+        std::optional<HeartBeat> m_peak_detector();
+
+    public:
+        std::optional<float> push_data(std::vector<float>& raw_data_mv);
+};
+
+/*
+std::optional<float> PanTompkins::push_data(std::vector<float>& raw_data_mv){
+    // check if enough data is in filter pipeline stage buffers for processing to take place
+    if (m_temp_raw_buff.size() >= 12) {
+        m_lowpass();
+    }
+}*/
+
+
 std::vector<HeartBeat> HeartRateAnalyzer::_pam_tompkins(std::vector<float>& raw_data_mv){
     std::vector<float> lowpass(raw_data_mv.size(), 0.0f); // TODO: optimization (circular buffer or whatever)
 
