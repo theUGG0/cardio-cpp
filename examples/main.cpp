@@ -1,4 +1,5 @@
 
+#include <cstddef>
 #include <fstream>
 #include <iostream>
 #include <regex>
@@ -26,7 +27,10 @@ vector<float> read_csv_data(string filename){
 
 int main(){
     vector<float> data{read_csv_data("100_ekg.csv")};
-    HeartRateAnalyzer h{};
-
-    h._pam_tompkins(data, 360);
+    PanTompkins<360> h{};
+    //h._pam_tompkins(data, 360);
+    size_t idx{};
+    for(auto x : data){
+        h.push_data(x, ++idx);
+    }
 }
