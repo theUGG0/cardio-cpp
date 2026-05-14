@@ -41,6 +41,8 @@ class circular_buffer
         void push_value(T n);
         size_t size();
         bool full();
+        std::array<T, BS>::iterator begin();
+        std::array<T, BS>::iterator end();
         T& operator[] (size_t n);
 };
 
@@ -70,6 +72,16 @@ bool circular_buffer<T, BS>::full(){
     return m_fill_count >= BS;
 }
 
+template<typename T, size_t BS>
+std::array<T, BS>::iterator circular_buffer<T, BS>::begin(){
+    return m_data.begin();
+}
+
+template<typename T, size_t BS>
+std::array<T, BS>::iterator circular_buffer<T, BS>::end(){
+    return m_data.end();
+}
+
 class HeartRateAnalyzer
 {
     private:
@@ -97,8 +109,8 @@ class PanTompkins
         // each buffer gets its name from what stage its buffering FOR
         circular_buffer<DataSample, 13> m_lowpass_buff{};
         circular_buffer<DataSample, 33> m_highpass_buff{};
-        circular_buffer<DataSample, 4> m_sqr_derivative_buff{};
         static constexpr int m_integrate_window{static_cast<size_t>(SAMPLERATE * 0.35)};
+        circular_buffer<DataSample, static_cast<size_t>(m_integrate_window)> m_sqr_derivative_buff{};
         circular_buffer<DataSample, static_cast<size_t>(m_integrate_window)> m_integrate_buff{};
         double m_sliding_sum{};
         circular_buffer<DataSample, 4> m_detector_buff{};
@@ -109,7 +121,7 @@ class PanTompkins
         void m_integrate();
 
         static constexpr int m_learning_needed_samples{SAMPLERATE*2};
-        static constexpr int m_refractory_period{static_cast<size_t>(SAMPLERATE*0.2)};
+        static const uint32_t m_refractory_period{200};
 
         uint32_t m_last_QRS_timestamp_ms{};
         // running estimates for integrated signal
@@ -128,7 +140,7 @@ class PanTompkins
 
         void m_initialise_thresholds(double &SPK, double &NPK, double &threshold, std::array<float, m_learning_needed_samples> buffer);
 
-        std::optional<DataSample> m_peak_detector(uint32_t timestamp_ms); //TODO: paper says total delay should be 24 samples i think. need to account for
+        std::optional<DataSample> m_peak_detector(); //TODO: paper says total delay should be 24 samples i think. need to account for
 
         // DEBUG (file)
         std::ofstream file;
@@ -158,7 +170,7 @@ std::optional<DataSample> PanTompkins<SAMPLERATE>::push_data(DataSample new_data
         m_initialise_thresholds(m_SPKI, m_NPKI, m_thresholdI, m_thresh_i_learning_buff);
     }
 
-    //if(m_detector_buff.full()) m_peak_detector();
+    if(m_detector_buff.full()) m_peak_detector();
     return std::nullopt;
 }
 
@@ -229,23 +241,38 @@ void PanTompkins<SAMPLERATE>::m_initialise_thresholds(double &SPK, double &NPK, 
 // TODO: Implement searchback with half of thresholdI1 at 1.66x RR interval passed with no peaks.
 // TODO: paper says total delay should be 24 samples i think. need to account for
 template<size_t SAMPLERATE>
-std::optional<DataSample> PanTompkins<SAMPLERATE>::m_peak_detector(uint32_t new_data_timestamp_ms){
+std::optional<DataSample> PanTompkins<SAMPLERATE>::m_peak_detector(){
 
-    uint32_t timestamp_ms = new_data_timestamp_ms; // account for every filter's delay;
+    std::optional<DataSample> ret_QRS{};
 
     if (m_detector_buff[2].reading_mv < m_detector_buff[1].reading_mv && m_detector_buff[1].reading_mv > m_detector_buff[0].reading_mv) {
-        float peakI = m_detector_buff[1].reading_mv;
+        DataSample peakI = m_detector_buff[1];
 
-        if (m_last_QRS_timestamp_ms > 0 && (timestamp_ms - m_last_QRS_timestamp_ms <= m_refractory_period)){
-            return std::nullopt;
+        // account for refractory period
+        if (m_last_QRS_timestamp_ms > 0 && (peakI.timestamp_ms - m_last_QRS_timestamp_ms <= m_refractory_period)){
+            return std::nullopt; // TODO: this peak should be seen as noise no?
         }
 
         // if peak, check for it in bandpass filtered signal
-        if (peakI > m_thresholdI){
+        if (peakI.reading_mv > m_thresholdI){
 
+            DataSample peakF; 
+            for (size_t i; i < 33; i++){
+                if (m_highpass_buff[i].timestamp_ms == peakF.timestamp_ms){
+                    peakF = m_highpass_buff[i];
+                    break;
+                }
+            }
+            
+            if (peakF.reading_mv > m_thresholdF){
+                
+                ret_QRS = DataSample{peakF.timestamp_ms, peakF.reading_mv};
+            }
         }
     }
-} 
+
+    return ret_QRS;
+}  
 
 
 std::vector<DataSample> HeartRateAnalyzer::_pam_tompkins(std::vector<float>& raw_data_mv){
