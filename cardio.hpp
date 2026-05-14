@@ -9,14 +9,12 @@
 #include <limits>
 #include <numeric>
 #include <optional>
-#include <queue>
-#include <unordered_set>
 #include <vector>
 
-struct HeartBeat
+struct DataSample
 {
     uint32_t timestamp_ms;
-    uint32_t peak_mv;
+    float reading_mv;
 };
 
 struct HRVStatus
@@ -80,13 +78,13 @@ class HeartRateAnalyzer
     public:
         HeartRateAnalyzer() = default;
         HeartRateAnalyzer(int sample_rate_hz) : m_sampling_rate_hz(sample_rate_hz) {};
-        std::vector<HeartBeat> _pam_tompkins(std::vector<float>& raw_data_mv);
+        std::vector<DataSample> _pam_tompkins(std::vector<float>& raw_data_mv);
 
         int add_data(std::vector<float> data);
         int push_data(float sample, uint32_t timestamp_ms);
 
         HRVStatus get_status(uint32_t window_start_ms, uint32_t window_end_ms);
-        std::vector<HeartBeat> get_beats(uint32_t window_start_ms, uint32_t window_end_ms);
+        std::vector<DataSample> get_beats(uint32_t window_start_ms, uint32_t window_end_ms);
 };
 
 // based on https://en.wikipedia.org/wiki/Pan%E2%80%93Tompkins_algorithm
@@ -97,40 +95,40 @@ class PanTompkins
     private:
 
         // each buffer gets its name from what stage its buffering FOR
-        circular_buffer<float, 13> m_lowpass_buff{};
-        circular_buffer<float, 33> m_highpass_buff{};
-        circular_buffer<float, 4> m_sqr_derivative_buff{};
-        static constexpr size_t m_integrate_window{static_cast<size_t>(SAMPLERATE * 0.35)};
-        circular_buffer<float, static_cast<size_t>(m_integrate_window)> m_integrate_buff{};
+        circular_buffer<DataSample, 13> m_lowpass_buff{};
+        circular_buffer<DataSample, 33> m_highpass_buff{};
+        circular_buffer<DataSample, 4> m_sqr_derivative_buff{};
+        static constexpr int m_integrate_window{static_cast<size_t>(SAMPLERATE * 0.35)};
+        circular_buffer<DataSample, static_cast<size_t>(m_integrate_window)> m_integrate_buff{};
         double m_sliding_sum{};
-        circular_buffer<float, 4> m_detector_buff{};
+        circular_buffer<DataSample, 4> m_detector_buff{};
 
         void m_lowpass();
         void m_highpass();
         void m_sqr_derivative();
         void m_integrate();
 
-        // TODO: 2 second learning stage for thresholds
+        static constexpr int m_learning_needed_samples{SAMPLERATE*2};
+        static constexpr int m_refractory_period{static_cast<size_t>(SAMPLERATE*0.2)};
 
-        static constexpr size_t m_learning_needed_samples{SAMPLERATE*2};
-
+        uint32_t m_last_QRS_timestamp_ms{};
         // running estimates for integrated signal
-        size_t m_integrated_init_buff_len{};
+        int m_integrated_init_buff_len{};
         std::array<float, m_learning_needed_samples> m_thresh_i_learning_buff{}; // samplerate * 2 for 2 secs of samples
         double m_SPKI{}; // signal peak
         double m_NPKI{}; // noise peak
-        double m_thresholdI{std::numeric_limits<double>::quiet_NaN()}; //0.35 * m_max_integrated;
+        double m_thresholdI{std::numeric_limits<double>::quiet_NaN()};
         
         // running estimates for highpass filtered signal  
-        size_t m_filtered_init_buff_len{};
+        int m_filtered_init_buff_len{};
         std::array<float, m_learning_needed_samples> m_thresh_f_learning_buff{};
         double m_SPKF{};
         double m_NPKF{};
-        double m_thresholdF{std::numeric_limits<double>::quiet_NaN()}; // 0.35 * max_filtered;
+        double m_thresholdF{std::numeric_limits<double>::quiet_NaN()};
 
         void m_initialise_thresholds(double &SPK, double &NPK, double &threshold, std::array<float, m_learning_needed_samples> buffer);
 
-        std::optional<HeartBeat> m_peak_detector(); //TODO: paper says total delay should be 24 samples i think. need to account for
+        std::optional<DataSample> m_peak_detector(uint32_t timestamp_ms); //TODO: paper says total delay should be 24 samples i think. need to account for
 
         // DEBUG (file)
         std::ofstream file;
@@ -139,15 +137,12 @@ class PanTompkins
             file << "index,integrated\n";
         };
         ~PanTompkins() = default;
-        std::optional<HeartBeat> push_data(float raw_data_mv, uint32_t timestamp_ms);
+        std::optional<DataSample> push_data(DataSample new_data);
 };
 
 template<size_t SAMPLERATE>
-std::optional<HeartBeat> PanTompkins<SAMPLERATE>::push_data(float raw_data_mv, uint32_t timestamp_ms){
-    m_lowpass_buff.push_value(raw_data_mv);
-    
-    // DEBUG
-    file << timestamp_ms << ",";
+std::optional<DataSample> PanTompkins<SAMPLERATE>::push_data(DataSample new_data){
+    m_lowpass_buff.push_value(new_data);
 
     if(m_lowpass_buff.full()) m_lowpass();
     if(m_highpass_buff.full()) m_highpass();
@@ -169,43 +164,43 @@ std::optional<HeartBeat> PanTompkins<SAMPLERATE>::push_data(float raw_data_mv, u
 
 template<size_t SAMPLERATE>
 void PanTompkins<SAMPLERATE>::m_lowpass(){
-        m_highpass_buff.push_value(m_lowpass_buff[0] 
-            - 2*m_lowpass_buff[6] 
-            + m_lowpass_buff[12] 
-            + 2*m_highpass_buff[1]
-            - m_highpass_buff[2]);
-        m_highpass_buff[0] /= 32; // normalize gain
+        // filter delay is 2
+        m_highpass_buff.push_value(DataSample(m_lowpass_buff[2].timestamp_ms,
+            m_lowpass_buff[0].reading_mv 
+            - 2*m_lowpass_buff[6].reading_mv 
+            + m_lowpass_buff[12].reading_mv 
+            + 2*m_highpass_buff[1].reading_mv
+            - m_highpass_buff[2].reading_mv));
+        m_highpass_buff[0].reading_mv /= 32; // normalize gain
 }
 
 template<size_t SAMPLERATE>
 void PanTompkins<SAMPLERATE>::m_highpass(){
 
-    float highpass_val = m_highpass_buff[1] 
-        - m_highpass_buff[0]/32.0f // div by 32 comes from the errata corrige of the paper
-        + m_highpass_buff[16] 
-        - m_highpass_buff[17] 
-        + m_highpass_buff[32]/32.0f;
+    float highpass_val = m_highpass_buff[1].reading_mv
+        - m_highpass_buff[0].reading_mv/32.0f // div by 32 comes from the errata corrige of the paper i think
+        + m_highpass_buff[16].reading_mv
+        - m_highpass_buff[17].reading_mv
+        + m_highpass_buff[32].reading_mv/32.0f;
 
     if(m_filtered_init_buff_len < m_learning_needed_samples){
         m_thresh_f_learning_buff[++m_filtered_init_buff_len] = highpass_val;
     }
-
-    m_sqr_derivative_buff.push_value(highpass_val);
+    // filter delay is 16
+    m_sqr_derivative_buff.push_value(DataSample(m_highpass_buff[16].timestamp_ms, highpass_val));
 }
 
 template<size_t SAMPLERATE>
 void PanTompkins<SAMPLERATE>::m_sqr_derivative(){
-    m_sqr_derivative_buff.push_value(
+    m_integrate_buff.push_value(DataSample(m_sqr_derivative_buff[2].timestamp_ms,
         pow(
-            0.125 * (2*m_highpass_buff[0] 
-                    + m_highpass_buff[1] 
-                    - m_highpass_buff[3] 
-                    - 2*m_highpass_buff[4]),
-             2));
+            0.125 * (2*m_sqr_derivative_buff[0].reading_mv
+                    + m_sqr_derivative_buff[1].reading_mv 
+                    - m_sqr_derivative_buff[3].reading_mv 
+                    - 2*m_sqr_derivative_buff[4].reading_mv),
+             2)));
     
-    m_sliding_sum += m_sqr_derivative_buff[0];
-    // DEBUG
-    file << m_sqr_derivative_buff[0] << ",\n";
+    m_sliding_sum += m_sqr_derivative_buff[0].reading_mv;
 }
 
 template<size_t SAMPLERATE>
@@ -217,19 +212,44 @@ void PanTompkins<SAMPLERATE>::m_integrate(){
         m_thresh_i_learning_buff[++m_integrated_init_buff_len] = integrated_val;
     }
 
-    m_detector_buff.push_value(integrated_val);
-    m_sliding_sum -= m_sqr_derivative_buff[m_integrate_window-1];
+    // the timestamp here is iffy.. need to think through the filter delay
+    m_detector_buff.push_value(DataSample(m_sqr_derivative_buff[m_integrate_window/2].timestamp_ms, integrated_val));
+    m_sliding_sum -= m_sqr_derivative_buff[m_integrate_window-1].reading_mv;
 }
 
 template<size_t SAMPLERATE>
 void PanTompkins<SAMPLERATE>::m_initialise_thresholds(double &SPK, double &NPK, double &threshold, std::array<float, m_learning_needed_samples> buffer){
-    SPK = *std::max_element(buffer.begin(), buffer.end()); // might be an issue, see https://en.cppreference.com/cpp/algorithm/max notes
-    NPK = std::accumulate(buffer.begin(), buffer.end(), 0) / m_learning_needed_samples;
+    SPK = *std::max_element(buffer.begin(), buffer.end());
+    NPK = std::accumulate(buffer.begin(), buffer.end(), 0.0l) / m_learning_needed_samples;
     threshold = NPK+0.25*(SPK-NPK);
+
+    std::cout << "THRESHOLDS: " << SPK << " " << NPK << " " << threshold << "\n";
 }
 
-std::vector<HeartBeat> HeartRateAnalyzer::_pam_tompkins(std::vector<float>& raw_data_mv){
-    std::vector<float> lowpass(raw_data_mv.size(), 0.0f); // TODO: optimization (circular buffer or whatever)
+// TODO: Implement searchback with half of thresholdI1 at 1.66x RR interval passed with no peaks.
+// TODO: paper says total delay should be 24 samples i think. need to account for
+template<size_t SAMPLERATE>
+std::optional<DataSample> PanTompkins<SAMPLERATE>::m_peak_detector(uint32_t new_data_timestamp_ms){
+
+    uint32_t timestamp_ms = new_data_timestamp_ms; // account for every filter's delay;
+
+    if (m_detector_buff[2].reading_mv < m_detector_buff[1].reading_mv && m_detector_buff[1].reading_mv > m_detector_buff[0].reading_mv) {
+        float peakI = m_detector_buff[1].reading_mv;
+
+        if (m_last_QRS_timestamp_ms > 0 && (timestamp_ms - m_last_QRS_timestamp_ms <= m_refractory_period)){
+            return std::nullopt;
+        }
+
+        // if peak, check for it in bandpass filtered signal
+        if (peakI > m_thresholdI){
+
+        }
+    }
+} 
+
+
+std::vector<DataSample> HeartRateAnalyzer::_pam_tompkins(std::vector<float>& raw_data_mv){
+    std::vector<float> lowpass(raw_data_mv.size(), 0.0f);
 
     for (size_t i = 12; i < raw_data_mv.size(); i++){
         lowpass[i] = raw_data_mv[i] 
@@ -299,7 +319,6 @@ std::vector<HeartBeat> HeartRateAnalyzer::_pam_tompkins(std::vector<float>& raw_
     bool first_peak = true;
     
 
-    // TODO: Implement searchback with half of thresholdI1 at 1.66x RR interval passed with no peaks.
     // TODO: Fix offset issues with detected peaks (seems to be around 30 samples)
 
     for (size_t i = 2; i < integrated.size(); i++){
