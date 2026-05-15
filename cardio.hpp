@@ -274,13 +274,12 @@ std::optional<DataSample> PanTompkins<SAMPLERATE>::m_peak_detector(){
                 }
             }
             if(!foundPeakF){
-                std::cout << "\n\nNO PEAK FOUND AT " << peakI.timestamp_ms << "\n\n";
                 m_NPKI = get_new_PK_thresh(peakI.reading_mv, m_NPKI);
                 m_update_thresholds();
                 return ret_QRS;
             }
             
-            if (peakF.reading_mv > m_thresholdF){
+            if (std::abs(peakF.reading_mv) > m_thresholdF){
                 ret_QRS = peakF;
 
                 m_last_QRS_timestamp_ms = ret_QRS->timestamp_ms;
