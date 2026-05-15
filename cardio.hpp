@@ -106,11 +106,12 @@ class PanTompkins
 {
     private:
 
+        static constexpr int m_integrate_window{static_cast<size_t>(SAMPLERATE * 0.35)};
+
         // each buffer gets its name from what stage its buffering FOR
         circular_buffer<DataSample, 13> m_lowpass_buff{};
         circular_buffer<DataSample, 33> m_highpass_buff{};
-        static constexpr int m_integrate_window{static_cast<size_t>(SAMPLERATE * 0.35)};
-        circular_buffer<DataSample, static_cast<size_t>(m_integrate_window)> m_sqr_derivative_buff{};
+        circular_buffer<DataSample, static_cast<size_t>(m_integrate_window*2)> m_sqr_derivative_buff{};
         circular_buffer<DataSample, static_cast<size_t>(m_integrate_window)> m_integrate_buff{};
         double m_sliding_sum{};
         circular_buffer<DataSample, 4> m_detector_buff{};
@@ -123,7 +124,7 @@ class PanTompkins
         static constexpr int m_learning_needed_samples{SAMPLERATE*2};
         static const uint32_t m_refractory_period{200};
 
-        uint32_t m_last_QRS_timestamp_ms{};
+        uint32_t m_last_QRS_timestamp_ms{0};
         // running estimates for integrated signal
         int m_integrated_init_buff_len{};
         std::array<float, m_learning_needed_samples> m_thresh_i_learning_buff{}; // samplerate * 2 for 2 secs of samples
@@ -142,13 +143,8 @@ class PanTompkins
         void m_update_thresholds();
 
         std::optional<DataSample> m_peak_detector(); //TODO: paper says total delay should be 24 samples i think. need to account for
-
-        // DEBUG (file)
-        std::ofstream file;
     public:
-        PanTompkins() : file{"testout.csv"} {
-            file << "index,integrated\n";
-        };
+        PanTompkins() = default;
         ~PanTompkins() = default;
         std::optional<DataSample> push_data(DataSample new_data);
 };
@@ -172,7 +168,7 @@ std::optional<DataSample> PanTompkins<SAMPLERATE>::push_data(DataSample new_data
     }
 
     if(m_detector_buff.full()) return m_peak_detector();
-    
+
     return std::nullopt;
 }
 
@@ -198,7 +194,7 @@ void PanTompkins<SAMPLERATE>::m_highpass(){
         + m_highpass_buff[32].reading_mv/32.0f;
 
     if(m_filtered_init_buff_len < m_learning_needed_samples){
-        m_thresh_f_learning_buff[++m_filtered_init_buff_len] = highpass_val;
+        m_thresh_f_learning_buff[m_filtered_init_buff_len++] = highpass_val;
     }
     // filter delay is 16
     m_sqr_derivative_buff.push_value(DataSample(m_highpass_buff[16].timestamp_ms, highpass_val));
@@ -223,7 +219,7 @@ void PanTompkins<SAMPLERATE>::m_integrate(){
     float integrated_val = m_sliding_sum / m_integrate_window;
 
     if(m_integrated_init_buff_len < m_learning_needed_samples){
-        m_thresh_i_learning_buff[++m_integrated_init_buff_len] = integrated_val;
+        m_thresh_i_learning_buff[m_integrated_init_buff_len++] = integrated_val;
     }
 
     // the timestamp here is iffy.. need to think through the filter delay
@@ -261,22 +257,33 @@ std::optional<DataSample> PanTompkins<SAMPLERATE>::m_peak_detector(){
         // account for refractory period
         if (m_last_QRS_timestamp_ms > 0 && (peakI.timestamp_ms - m_last_QRS_timestamp_ms <= m_refractory_period)){
             m_NPKI = get_new_PK_thresh(peakI.reading_mv, m_NPKI);
-            return std::nullopt;
+            m_update_thresholds();
+            return ret_QRS;
         }
 
         // if peak, check for it in bandpass filtered signal
         if (peakI.reading_mv > m_thresholdI){
 
             DataSample peakF; // TODO: add some check here for if the peak isnt found
-            for (size_t i; i < 33; i++){
-                if (m_highpass_buff[i].timestamp_ms == peakF.timestamp_ms){
-                    peakF = m_highpass_buff[i];
+            bool foundPeakF{false};
+            for (size_t i{0}; i < m_integrate_window*2; i++){
+                if (m_sqr_derivative_buff[i].timestamp_ms == peakI.timestamp_ms){
+                    peakF = m_sqr_derivative_buff[i];
+                    foundPeakF = true;
                     break;
                 }
+            }
+            if(!foundPeakF){
+                std::cout << "\n\nNO PEAK FOUND AT " << peakI.timestamp_ms << "\n\n";
+                m_NPKI = get_new_PK_thresh(peakI.reading_mv, m_NPKI);
+                m_update_thresholds();
+                return ret_QRS;
             }
             
             if (peakF.reading_mv > m_thresholdF){
                 ret_QRS = peakF;
+
+                m_last_QRS_timestamp_ms = ret_QRS->timestamp_ms;
 
                 m_SPKF = get_new_PK_thresh(peakF.reading_mv, m_SPKF);
                 m_SPKI = get_new_PK_thresh(peakI.reading_mv, m_SPKI);
