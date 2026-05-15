@@ -139,6 +139,7 @@ class PanTompkins
         double m_thresholdF{std::numeric_limits<double>::quiet_NaN()};
 
         void m_initialise_thresholds(double &SPK, double &NPK, double &threshold, std::array<float, m_learning_needed_samples> buffer);
+        void m_update_thresholds();
 
         std::optional<DataSample> m_peak_detector(); //TODO: paper says total delay should be 24 samples i think. need to account for
 
@@ -170,7 +171,8 @@ std::optional<DataSample> PanTompkins<SAMPLERATE>::push_data(DataSample new_data
         m_initialise_thresholds(m_SPKI, m_NPKI, m_thresholdI, m_thresh_i_learning_buff);
     }
 
-    if(m_detector_buff.full()) m_peak_detector();
+    if(m_detector_buff.full()) return m_peak_detector();
+    
     return std::nullopt;
 }
 
@@ -238,11 +240,19 @@ void PanTompkins<SAMPLERATE>::m_initialise_thresholds(double &SPK, double &NPK, 
     std::cout << "THRESHOLDS: " << SPK << " " << NPK << " " << threshold << "\n";
 }
 
+template<size_t SAMPLERATE>
+void PanTompkins<SAMPLERATE>::m_update_thresholds(){
+    m_thresholdI = m_NPKI + 0.25 * (m_SPKI - m_NPKI);
+    m_thresholdF = m_NPKF + 0.25 * (m_SPKF - m_NPKF);
+}
+
+
 // TODO: Implement searchback with half of thresholdI1 at 1.66x RR interval passed with no peaks.
 // TODO: paper says total delay should be 24 samples i think. need to account for
 template<size_t SAMPLERATE>
 std::optional<DataSample> PanTompkins<SAMPLERATE>::m_peak_detector(){
 
+    auto get_new_PK_thresh = [](double peak, double thresh){return 0.125 * peak + 0.875 * thresh;};
     std::optional<DataSample> ret_QRS{};
 
     if (m_detector_buff[2].reading_mv < m_detector_buff[1].reading_mv && m_detector_buff[1].reading_mv > m_detector_buff[0].reading_mv) {
@@ -250,13 +260,14 @@ std::optional<DataSample> PanTompkins<SAMPLERATE>::m_peak_detector(){
 
         // account for refractory period
         if (m_last_QRS_timestamp_ms > 0 && (peakI.timestamp_ms - m_last_QRS_timestamp_ms <= m_refractory_period)){
-            return std::nullopt; // TODO: this peak should be seen as noise no?
+            m_NPKI = get_new_PK_thresh(peakI.reading_mv, m_NPKI);
+            return std::nullopt;
         }
 
         // if peak, check for it in bandpass filtered signal
         if (peakI.reading_mv > m_thresholdI){
 
-            DataSample peakF; 
+            DataSample peakF; // TODO: add some check here for if the peak isnt found
             for (size_t i; i < 33; i++){
                 if (m_highpass_buff[i].timestamp_ms == peakF.timestamp_ms){
                     peakF = m_highpass_buff[i];
@@ -265,11 +276,24 @@ std::optional<DataSample> PanTompkins<SAMPLERATE>::m_peak_detector(){
             }
             
             if (peakF.reading_mv > m_thresholdF){
-                
-                ret_QRS = DataSample{peakF.timestamp_ms, peakF.reading_mv};
+                ret_QRS = peakF;
+
+                m_SPKF = get_new_PK_thresh(peakF.reading_mv, m_SPKF);
+                m_SPKI = get_new_PK_thresh(peakI.reading_mv, m_SPKI);
+            }
+
+            // else wasnt an R peak, update noise
+            else {
+                m_NPKF = get_new_PK_thresh(peakF.reading_mv, m_NPKF);
+                m_NPKI = get_new_PK_thresh(peakI.reading_mv, m_NPKI);
             }
         }
+        else {
+            m_NPKI = get_new_PK_thresh(peakI.reading_mv, m_NPKI);
+        }
     }
+
+    m_update_thresholds();
 
     return ret_QRS;
 }  
