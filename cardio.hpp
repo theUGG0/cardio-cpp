@@ -106,7 +106,7 @@ class PanTompkins
 {
     private:
 
-        static constexpr int m_integrate_window{static_cast<size_t>(SAMPLERATE * 0.35)};
+        static constexpr int m_integrate_window{static_cast<size_t>(SAMPLERATE * 0.15)};
 
         // each buffer gets its name from what stage its buffering FOR
         circular_buffer<DataSample, 13> m_lowpass_buff{};
