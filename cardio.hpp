@@ -108,15 +108,20 @@ class HeartRateAnalyzer
 
 template<unsigned int SAMPLERATE> 
 void HeartRateAnalyzer<SAMPLERATE>::m_update_avg_RR(){
-    int peaks_size = m_rpeaks.size();
-    if (m_rpeaks.size() >= 8){
-        peaks_size = 8;
+    if (m_rpeaks.size() < 2) return;  // need at least 2 peaks for 1 interval
+
+    size_t peaks_to_use = std::min<size_t>(m_rpeaks.size(), 8);
+
+    std::vector<uint32_t> intervals;
+    intervals.reserve(peaks_to_use - 1);
+    for (size_t i = 1; i < peaks_to_use; ++i){
+        auto newer = std::prev(m_rpeaks.end(), i);
+        auto older = std::prev(m_rpeaks.end(), i + 1);
+        intervals.push_back(newer->timestamp_ms - older->timestamp_ms);
     }
-    std::vector<uint32_t> intervals{};
-    for (int i{1}; i < peaks_size; i++){
-        intervals.push_back(std::prev(m_rpeaks.end(), i-1)->timestamp_ms - std::prev(m_rpeaks.end(), i)->timestamp_ms  );
-    }
-    m_avg_RR_interval = std::accumulate((intervals.begin()), intervals.end(), 0.0f) / (peaks_size-1);
+
+    uint64_t sum = std::accumulate(intervals.begin(), intervals.end(), uint64_t{0});
+    m_avg_RR_interval = static_cast<uint32_t>(sum / intervals.size());
 }
 
 template<unsigned int SAMPLERATE> 
